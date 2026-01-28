@@ -2,4 +2,3 @@ streamlit
 pydantic
 openai
 uvicorn
-fastapi
