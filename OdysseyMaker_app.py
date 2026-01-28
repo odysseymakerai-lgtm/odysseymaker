@@ -136,32 +136,29 @@ Never output markdown, only JSON.
 
 def enforce_openai_strict_schema(schema: dict) -> dict:
     """
-    OpenAI strict JSON schema requirements (as enforced by the API):
+    OpenAI strict JSON schema requirements:
       - For every object schema:
           - additionalProperties must be false
-          - required must exist and include EVERY key in properties
-    Pydantic's model_json_schema() doesn't always set required that way (esp. fields w/ defaults),
+          - required must include EVERY key in properties
+    Pydantic's model_json_schema() may omit required for fields w/ defaults,
     so we patch it recursively.
     """
     def walk(node):
         if isinstance(node, dict):
-            # Recurse first so nested pieces get patched too
             for v in node.values():
                 walk(v)
 
             if node.get("type") == "object":
                 props = node.get("properties", {})
                 if isinstance(props, dict) and props:
-                    # Force strict "no extra keys"
                     node["additionalProperties"] = False
-                    # Force "all keys required"
                     node["required"] = sorted(list(props.keys()))
 
         elif isinstance(node, list):
             for item in node:
                 walk(item)
 
-    schema_copy = json.loads(json.dumps(schema))  # deep copy
+    schema_copy = json.loads(json.dumps(schema))
     walk(schema_copy)
     return schema_copy
 
@@ -273,6 +270,277 @@ def generate_outline_pair(client: OpenAI, model: str, req: OutlineRequest) -> Ou
 
 
 # =========================
+# Demo Mode (no API calls)
+# =========================
+
+def demo_outline_response(req: OutlineRequest) -> OutlineResponse:
+    outline = AdventureOutline(
+        title="Demo: The Leyline Theft",
+        logline=f"(Demo mode) A short adventure based on: {req.concept[:140]}",
+        central_conflict="A hidden engine is siphoning ley energy, warping reality and drawing hostile incursions.",
+        villain_or_antagonist="The Conduit Architect, a grief-twisted arcanist who believes the new world must be stabilized at any cost.",
+        themes=[req.theme, req.tone, "mystery", "consequence"],
+        hooks=[
+            "A trading caravan vanishes along a route that now ‘loops’ back on itself.",
+            "A village well reflects a different sky at night; those who stare too long dream of a door of bone and glass.",
+        ],
+        key_npcs=[
+            KeyNPC(
+                name="Elder Myrla Fen",
+                role="Hamlet leader and guide",
+                public_face="Practical, suspicious, deeply tired",
+                secret="She’s been trading favors with the phenomenon to keep her people safe.",
+                leverage="Knows a hidden path to the ruins and who first brought the ‘lens’ relic to town.",
+            ),
+            KeyNPC(
+                name="Archivist Rell",
+                role="Obsessive researcher",
+                public_face="Eager, verbose, helpful",
+                secret="Stole a focus crystal that worsened the siphon.",
+                leverage="Can translate the Draconic lintel and identify the correct ‘alignment’ for the door puzzle.",
+            ),
+            KeyNPC(
+                name="Silk-in-the-Mist",
+                role="Fey emissary (ambiguous ally)",
+                public_face="Playful and polite; never answers directly",
+                secret="Wants the conduit left partially open to expand Fey influence.",
+                leverage="Can grant safe passage if the party accepts a bargain—small now, costly later.",
+            ),
+        ],
+        factions=[
+            Faction(
+                name="The Lantern Wardens",
+                goal="Keep the road open and people alive",
+                method="Curfews, patrols, controlled information",
+                complication="They’re one bad night from turning into a paranoid mob.",
+            ),
+            Faction(
+                name="The Mirror Court (Fey)",
+                goal="Exploit the thinning veil for territory",
+                method="Bargains, gifts, subtle replacements",
+                complication="Their ‘help’ always changes someone.",
+            ),
+        ],
+        beats=[
+            StoryBeat(
+                beat_id="B1",
+                title="The Road that Repeats",
+                purpose="Hook the party and establish reality glitches.",
+                stakes="If they can’t break the loop, supplies and people won’t reach the region.",
+                twist_or_reveal="The party finds their own footprints coming from the opposite direction.",
+            ),
+            StoryBeat(
+                beat_id="B2",
+                title="A Hamlet on Stilts",
+                purpose="Learn lore and meet key NPCs.",
+                stakes="If the hamlet collapses, the region loses its only refuge.",
+                twist_or_reveal="The well shows a different constellation than the real sky.",
+            ),
+            StoryBeat(
+                beat_id="B3",
+                title="The Draconic Gate",
+                purpose="Enter the primary site via a puzzle/skill challenge.",
+                stakes="Failing draws a guardian and alerts the antagonist.",
+                twist_or_reveal="The lintel names the Architect as a ‘mourner’ rather than a conqueror.",
+            ),
+            StoryBeat(
+                beat_id="B4",
+                title="The Conduit Chamber",
+                purpose="Main set-piece confrontation.",
+                stakes="If the siphon spikes, a planar tear opens permanently.",
+                twist_or_reveal="The ‘enemy’ is stabilizing the newborn plane with stolen power.",
+            ),
+            StoryBeat(
+                beat_id="B5",
+                title="Choice at Dawn",
+                purpose="Resolve with consequences and future hooks.",
+                stakes="Who controls the relic shapes the region’s fate.",
+                twist_or_reveal="A fey bargain can ‘fix’ things—by changing someone’s past.",
+            ),
+        ],
+        continuity_promises=[
+            "Reality glitches manifest as loops, mirrored skies, and repeated sounds.",
+            "A focus crystal/lens is a key component to see or tune the ley flow.",
+            "The hamlet depends on the party to keep the road open.",
+            "The ruins are draconic/dragonborn in origin with readable sigils.",
+            "A fey faction benefits from the veil staying thin.",
+            "The antagonist is motivated by grief and believes they are ‘saving’ something.",
+        ],
+    )
+
+    # Basic milestone progression respecting requested start/end levels
+    mid_level = req.party_level_start
+    if req.party_level_end > req.party_level_start:
+        mid_level = min(req.party_level_start + 1, req.party_level_end)
+
+    detailed = DetailedAdventureOutline(
+        outline_title=outline.title,
+        structure_notes=[
+            "Demo mode: no API calls were made. This content is prebuilt.",
+            "Includes combat and non-combat encounters plus milestone leveling.",
+        ],
+        scenes=[
+            Scene(
+                scene_id="S1",
+                title="The Road that Repeats",
+                location="A fog-choked causeway where landmarks reappear",
+                goal="Break the travel loop and find evidence of the missing caravan",
+                boxed_text="Fog presses close. Your lanternlight seems to lag behind your movements, like it’s remembering you rather than following you.",
+                obstacles=["Disorienting loop", "False trail markers", "Echoing footsteps that aren’t yours"],
+                encounters=[
+                    Encounter(
+                        encounter_id="E1",
+                        type="skill_challenge",
+                        difficulty="medium",
+                        summary="Navigate the loop by triangulating repeating signs and anchoring reality with a clever method.",
+                        win_condition="Accumulate enough successes to identify the ‘fixed’ landmark and exit the loop.",
+                        fail_forward="You exit, but lose time and arrive as something begins stalking the hamlet’s outskirts.",
+                        setup=["Let players propose skills; reward clever anchors (chalk marks, rope, rhythmic counting)."],
+                        scaling_notes=["If the party struggles, provide a clue from a half-faded draconic rune stone."],
+                    )
+                ],
+                clues_and_info=["A caravan token stamped with a lantern sigil", "Iridescent pollen (fey sign)"],
+                rewards=["Supplies cache (rations, rope, lamp oil)", "Map scrap pointing to an old draconic road gate"],
+                consequences=["Failing increases tension in the hamlet; Wardens impose stricter curfews."],
+                links_to_beats=["B1"],
+                estimated_minutes=45,
+            ),
+            Scene(
+                scene_id="S2",
+                title="A Hamlet on Stilts",
+                location="A stilted hamlet above black water",
+                goal="Gain trust, learn what changed, and identify the relic’s trail",
+                boxed_text="Homes balance on stilts over dark water. Wind chimes click with unsettling regularity—like a metronome for the fog.",
+                obstacles=["Suspicious locals", "Conflicting rumors", "A ‘helpful’ stranger asking too many questions"],
+                encounters=[
+                    Encounter(
+                        encounter_id="E2",
+                        type="social",
+                        difficulty="medium",
+                        summary="Win the Wardens’ trust and convince Elder Myrla to reveal the hidden route.",
+                        win_condition="Earn an invitation to a private meeting and access to the old gate key.",
+                        fail_forward="You get the key, but the Wardens shadow you and may intervene at a bad moment.",
+                        setup=["Present 3 rumors (true/half/false). Let players test them in conversation."],
+                        scaling_notes=["If stuck, Archivist Rell blurts out a crucial fact to ‘help’."],
+                    )
+                ],
+                clues_and_info=["The well reflects a different sky at night", "Rell mentions a ‘focus lens’ that ‘tunes the air’"],
+                rewards=["Old gate key", "Local ally (one Warden)"],
+                consequences=["If players antagonize locals, resource prices rise and help disappears."],
+                links_to_beats=["B2"],
+                estimated_minutes=50,
+            ),
+            Scene(
+                scene_id="S3",
+                title="The Draconic Gate",
+                location="Collapsed draconic stonework swallowed by roots",
+                goal="Open the sealed entry without triggering a full alarm",
+                boxed_text="Ancient scales carved in stone stare down. Their eyes—dark glass—drink your lanternlight until it feels colder.",
+                obstacles=["Sealed relief door", "Misaligned ‘scale’ panels", "Ambient magic that distorts sound"],
+                encounters=[
+                    Encounter(
+                        encounter_id="E3",
+                        type="puzzle",
+                        difficulty="medium",
+                        summary="Align draconic relief scales to match the ‘true’ constellation seen in the hamlet well.",
+                        win_condition="Door opens quietly; you keep the initiative later.",
+                        fail_forward="Door opens loudly; a guardian is active deeper within and time pressure increases.",
+                        setup=["Give 3 hints: well-constellation sketch, rune-stone pattern, and a ‘missing scale’ clue."],
+                        scaling_notes=["Allow Arcana/History checks to reveal the intended sequence if needed."],
+                    )
+                ],
+                clues_and_info=["Lintel names the Architect as ‘Mourner’", "Ley hum intensifies past the threshold"],
+                rewards=["Safe entry", "Foreshadow note about grief and ‘stabilizing’"],
+                consequences=["Noisy entry makes later combat harder (reinforcements or worse terrain)."],
+                links_to_beats=["B3"],
+                estimated_minutes=45,
+            ),
+            Scene(
+                scene_id="S4",
+                title="The Conduit Chamber",
+                location="A circular chamber with a central shaft and broken platforms",
+                goal="Stop or redirect the siphon before a tear stabilizes",
+                boxed_text="A shaft drops into darkness. The air tastes like lightning. Below, a slow pulse paints the stone with borrowed starlight.",
+                obstacles=["Vertical terrain", "Unstable platforms", "Siphon pulse countdown"],
+                encounters=[
+                    Encounter(
+                        encounter_id="E4",
+                        type="combat",
+                        difficulty="hard",
+                        summary="Fight a guardian while the conduit pulses each round, shifting platforms and opening brief rifts.",
+                        win_condition="Defeat or disable the guardian and disrupt the focus crystal’s alignment.",
+                        fail_forward="You survive but the tear partially stabilizes; a future incursion is guaranteed.",
+                        setup=["Use a 3-stage countdown. Each stage changes terrain (tilt platforms, rift hazards)."],
+                        scaling_notes=["Scale down by reducing hazards; scale up by adding rift-spawned minions."],
+                    )
+                ],
+                clues_and_info=["The conduit can stabilize the newborn plane—but at a cost", "The lens is a tuning key, not just treasure"],
+                rewards=["Focus lens relic", "Blueprint-like etchings of ley routes"],
+                consequences=["If tear stabilizes, the region changes: more fey/planar bleed, new rules at night."],
+                links_to_beats=["B4"],
+                estimated_minutes=60,
+            ),
+            Scene(
+                scene_id="S5",
+                title="Choice at Dawn",
+                location="Ruin exit overlooking the hamlet and the fog line",
+                goal="Choose what to do with the lens and how to handle the factions",
+                boxed_text="The fog thins. For the first time you hear the water—just water—like the world is holding its breath.",
+                obstacles=["Conflicting claims", "The ‘easy fix’ bargain", "Long-term consequences"],
+                encounters=[
+                    Encounter(
+                        encounter_id="E5",
+                        type="social",
+                        difficulty="medium",
+                        summary="Negotiate between the Wardens, Archivist Rell, and Silk-in-the-Mist about the lens.",
+                        win_condition="Choose a path and secure allies for the fallout.",
+                        fail_forward="You choose anyway, but you make an enemy who acts immediately.",
+                        setup=["Give 2–3 offers with clear costs/benefits. Make the bargain tempting but specific."],
+                        scaling_notes=["If table wants action, turn this into a chase or tense standoff instead."],
+                    )
+                ],
+                clues_and_info=["The antagonist’s goal is not simple evil", "This is the first node of a larger ley network"],
+                rewards=["Reputation and a faction ally", "A lead to the next anomaly site"],
+                consequences=["Your choice determines how thin the veil remains and who hunts you next."],
+                links_to_beats=["B5"],
+                estimated_minutes=45,
+            ),
+        ],
+        level_progression=[
+            LevelProgressionStep(
+                step_id="L1",
+                after_scene_id="S2",
+                level=mid_level,
+                rationale="Milestone: uncover the core mystery and secure access to the draconic gate.",
+                optional_side_objectives=["Help the Wardens with a nighttime watch to earn an extra resource."],
+            ),
+            LevelProgressionStep(
+                step_id="L2",
+                after_scene_id="S4",
+                level=req.party_level_end,
+                rationale="Milestone: confront the conduit chamber and claim the lens relic—major arc completion.",
+                optional_side_objectives=["Stabilize the tear completely with a risky alignment ritual (adds future complications)."],
+            ),
+        ],
+        optional_side_quests=[
+            "Night Watch: identify what’s stalking the hamlet’s outskirts (no combat required; can be a scare + clue trail).",
+            "The Well-Sky: record the false constellation and learn who first noticed it.",
+        ],
+        recap_questions=[
+            "Which faction did you trust the most, and why?",
+            "What did the lens feel like when you held it (cold, warm, alive, whispering)?",
+            "What consequence are you willing to accept to keep the world stable?",
+        ],
+    )
+    return OutlineResponse(outline=outline, detailed=detailed)
+
+
+def is_quota_error(e: Exception) -> bool:
+    msg = str(e)
+    return ("insufficient_quota" in msg) or ("exceeded your current quota" in msg)
+
+
+# =========================
 # Streamlit UI
 # =========================
 
@@ -283,15 +551,13 @@ st.title("OdysseyMaker — D&D Adventure Outline Generator")
 api_key = st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else None
 api_key = api_key or os.environ.get("OPENAI_API_KEY")
 
-if not api_key:
-    st.error("Missing OPENAI_API_KEY. Set it in Streamlit Secrets (recommended) or as an environment variable.")
-    st.stop()
-
-client = OpenAI(api_key=api_key)
+# Demo mode is allowed even without an API key
+client = OpenAI(api_key=api_key) if api_key else None
 
 with st.sidebar:
     st.header("Generation Settings")
 
+    demo_mode = st.checkbox("Demo mode (no API calls)", value=False)
     model = st.text_input("Model", value=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"))
     ruleset = st.selectbox("Ruleset", ["5e", "system_agnostic"], index=0)
     leveling_mode = st.selectbox("Leveling mode", ["milestone", "xp"], index=0)
@@ -314,6 +580,10 @@ with st.sidebar:
         height=90,
     )
 
+if not api_key and not demo_mode:
+    st.warning("No OPENAI_API_KEY found. Turn on Demo mode or set the key in Streamlit Secrets.")
+    st.stop()
+
 concept = st.text_area(
     "General concept / pitch",
     value="A grief-stricken wizard is siphoning ley lines into a newborn material plane, causing planar incursions. The party must trace anomalies through a fey-touched forest toward ruins of an ancient dragonborn city.",
@@ -329,6 +599,10 @@ with colY:
 if clear_btn:
     st.session_state.pop("outline_result", None)
     st.session_state.pop("last_error", None)
+
+# =========================
+# Generation trigger
+# =========================
 
 if generate_btn:
     constraints = [c.strip() for c in constraints_text.splitlines() if c.strip()]
@@ -351,18 +625,34 @@ if generate_btn:
         st.code(str(ve))
         st.stop()
 
-    with st.spinner("Generating high-level outline and detailed outline..."):
+    with st.spinner("Generating outline..."):
         try:
-            result = generate_outline_pair(client, model, req)
+            if demo_mode:
+                result = demo_outline_response(req)
+            else:
+                # Real generation
+                result = generate_outline_pair(client, model, req)  # type: ignore
+
             st.session_state["outline_result"] = result.model_dump()
             st.session_state.pop("last_error", None)
+
         except Exception as e:
-            st.session_state["last_error"] = str(e)
-            st.error(f"Generation failed: {e}")
+            if is_quota_error(e):
+                st.warning("API quota exceeded for this key. Switching to Demo mode output.")
+                result = demo_outline_response(req)
+                st.session_state["outline_result"] = result.model_dump()
+                st.session_state.pop("last_error", None)
+            else:
+                st.session_state["last_error"] = str(e)
+                st.error(f"Generation failed: {e}")
 
 if st.session_state.get("last_error"):
     st.warning("Last error:")
     st.code(st.session_state["last_error"])
+
+# =========================
+# Render results
+# =========================
 
 data = st.session_state.get("outline_result")
 if data:
@@ -460,6 +750,16 @@ if data:
             st.caption(lp.rationale)
             if lp.optional_side_objectives:
                 st.caption("Optional: " + "; ".join(lp.optional_side_objectives))
+
+        if result.detailed.optional_side_quests:
+            st.markdown("#### Optional side quests")
+            for q in result.detailed.optional_side_quests:
+                st.write(f"- {q}")
+
+        if result.detailed.recap_questions:
+            st.markdown("#### Recap questions")
+            for q in result.detailed.recap_questions:
+                st.write(f"- {q}")
 
     st.divider()
     col1, col2 = st.columns(2)
