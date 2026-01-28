@@ -1,14 +1,14 @@
 import json
 import os
-from typing import List, Literal
+from typing import List, Literal, Dict, Optional
 
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from openai import OpenAI
 
-# =========================
+# ============================================================
 # Domain Schemas (contract)
-# =========================
+# ============================================================
 
 Tone = Literal["grimdark", "heroic", "whimsical", "horror", "mystery", "epic"]
 Theme = Literal["fey", "undead", "dragons", "political", "heist", "cosmic", "wilderness", "dungeon", "urban"]
@@ -68,7 +68,7 @@ class AdventureOutline(BaseModel):
     beats: List[StoryBeat]
     continuity_promises: List[str] = Field(
         default_factory=list,
-        description="Facts that must remain true in detailed outline (always include this field)."
+        description="Facts that must remain true in detailed outline (always include this field).",
     )
 
 
@@ -120,14 +120,45 @@ class OutlineResponse(BaseModel):
     detailed: DetailedAdventureOutline
 
 
-# =========================
-# OpenAI helpers
-# =========================
+# ============================================================
+# Expanded Scene Guide (Step-by-step locations w/ read-aloud + DM info)
+# ============================================================
+
+class LocationStep(BaseModel):
+    step_id: str  # e.g., S3-L1
+    location_name: str
+    player_read_aloud: str
+    dm_background: str
+    sensory_details: List[str] = Field(default_factory=list)
+    interactive_elements: List[str] = Field(default_factory=list)
+    hidden_info: List[str] = Field(default_factory=list)
+    checks_and_dc: List[str] = Field(default_factory=list)
+    branching_choices: List[str] = Field(default_factory=list)
+    fail_forward: str
+    time_pressure: str = ""
+
+
+class ExpandedSceneGuide(BaseModel):
+    scene_id: str
+    scene_title: str
+    dm_scene_intent: str
+    scene_summary_for_dm: str
+    cast_in_scene: List[str]
+    step_by_step_locations: List[LocationStep]
+    encounter_integration_notes: List[str] = Field(default_factory=list)
+    loot_and_rewards_detail: List[str] = Field(default_factory=list)
+    continuity_checks: List[str] = Field(default_factory=list)
+    optional_complications: List[str] = Field(default_factory=list)
+
+
+# ============================================================
+# OpenAI helpers (strict schema patching + Responses API)
+# ============================================================
 
 SYSTEM = """You are a veteran tabletop RPG adventure designer.
 You output ONLY valid JSON that conforms exactly to the given schema.
 Be concrete and playable: specific names, locations, motivations, clear objectives.
-Include BOTH combat and non-combat encounters.
+Include BOTH combat and non-combat encounters when relevant.
 Avoid copyrighted setting text; create original material.
 If ruleset is 'system_agnostic', avoid 5e jargon (CR, XP tables), but keep difficulty labels.
 Never output markdown, only JSON.
@@ -140,8 +171,6 @@ def enforce_openai_strict_schema(schema: dict) -> dict:
       - For every object schema:
           - additionalProperties must be false
           - required must include EVERY key in properties
-    Pydantic's model_json_schema() may omit required for fields w/ defaults,
-    so we patch it recursively.
     """
     def walk(node):
         if isinstance(node, dict):
@@ -202,6 +231,10 @@ def generate_json_schema(
     )
     return json.loads(_extract_output_text(resp))
 
+
+# ============================================================
+# Adventure Outline + Detailed Outline generation
+# ============================================================
 
 def build_outline_prompt(req: OutlineRequest) -> dict:
     return {
@@ -269,9 +302,59 @@ def generate_outline_pair(client: OpenAI, model: str, req: OutlineRequest) -> Ou
     return OutlineResponse(outline=outline, detailed=detailed)
 
 
-# =========================
+# ============================================================
+# Scene Expansion (DM guide) generation
+# ============================================================
+
+def build_scene_expansion_prompt(
+    req: OutlineRequest,
+    outline: AdventureOutline,
+    detailed: DetailedAdventureOutline,
+    scene: Scene,
+) -> dict:
+    return {
+        "request": req.model_dump(),
+        "outline": outline.model_dump(),
+        "continuity_promises": outline.continuity_promises,
+        "scene": scene.model_dump(),
+        "requirements": [
+            "Expand ONLY the given scene into a step-by-step DM guide.",
+            "Write 5–10 LocationStep entries depending on scene complexity.",
+            "Each LocationStep MUST include player_read_aloud and dm_background.",
+            "Include concrete spatial progression: where the party is, what they see next, and why it matters.",
+            "Integrate the scene’s encounters: specify which step triggers each encounter and why.",
+            "Always include fail_forward outcomes so the scene never stalls.",
+            "Keep read-aloud to 2–6 sentences each (table-friendly). DM background can be longer.",
+            "Avoid copyrighted settings; use original names and descriptions.",
+            "If ruleset is system_agnostic, phrase checks as 'Easy/Moderate/Hard' instead of strict DC numbers.",
+        ],
+    }
+
+
+def generate_scene_guide(
+    client: OpenAI,
+    model: str,
+    req: OutlineRequest,
+    outline: AdventureOutline,
+    detailed: DetailedAdventureOutline,
+    scene: Scene,
+) -> ExpandedSceneGuide:
+    schema = enforce_openai_strict_schema(ExpandedSceneGuide.model_json_schema())
+    payload = build_scene_expansion_prompt(req, outline, detailed, scene)
+    data = generate_json_schema(
+        client=client,
+        model=model,
+        schema_name="expanded_scene_guide",
+        schema=schema,
+        user_payload=payload,
+        extra_instructions="Create an ExpandedSceneGuide JSON for ONLY this scene.",
+    )
+    return ExpandedSceneGuide.model_validate(data)
+
+
+# ============================================================
 # Demo Mode (no API calls)
-# =========================
+# ============================================================
 
 def demo_outline_response(req: OutlineRequest) -> OutlineResponse:
     outline = AdventureOutline(
@@ -368,7 +451,6 @@ def demo_outline_response(req: OutlineRequest) -> OutlineResponse:
         ],
     )
 
-    # Basic milestone progression respecting requested start/end levels
     mid_level = req.party_level_start
     if req.party_level_end > req.party_level_start:
         mid_level = min(req.party_level_start + 1, req.party_level_end)
@@ -535,23 +617,97 @@ def demo_outline_response(req: OutlineRequest) -> OutlineResponse:
     return OutlineResponse(outline=outline, detailed=detailed)
 
 
+def demo_scene_guide(req: OutlineRequest, outline: AdventureOutline, detailed: DetailedAdventureOutline, scene: Scene) -> ExpandedSceneGuide:
+    # A small but table-ready demo expansion
+    steps: List[LocationStep] = [
+        LocationStep(
+            step_id=f"{scene.scene_id}-L1",
+            location_name="Threshold & First Impression",
+            player_read_aloud="A temperature change washes over you as you cross the threshold. The air tastes faintly of metal and rain, and your footsteps seem to arrive a heartbeat late.",
+            dm_background="This is the first place the siphon’s resonance is strong enough to create a temporal echo. Emphasize subtle wrongness; it foreshadows later platform shifts or loops.",
+            sensory_details=["Lanternlight bends oddly at the edges", "A distant hum rises and falls like breathing"],
+            interactive_elements=["Hairline fractures in the stone form a readable pattern", "A half-buried marker-stone with draconic numerals"],
+            hidden_info=["A successful investigation reveals the pattern matches the well-constellation"],
+            checks_and_dc=["Moderate check to notice the hum syncs with the party’s movement"],
+            branching_choices=["If they mark the floor, the echo effect becomes obvious and grants advantage on the next navigation/puzzle"],
+            fail_forward="If they miss the pattern, an NPC clue or environmental repetition gives them a second chance.",
+            time_pressure="After 10 minutes, the hum spikes and the next chamber becomes more unstable.",
+        ),
+        LocationStep(
+            step_id=f"{scene.scene_id}-L2",
+            location_name="The Clue Nexus",
+            player_read_aloud="The corridor widens into a low chamber where old carvings ripple like heat haze. A glassy film coats parts of the wall, reflecting a sky that isn’t yours.",
+            dm_background="This is where you deliver the key clue tying the scene to the broader leyline siphon. Let them earn it through interaction: touch, examine, or compare to prior signs.",
+            sensory_details=["Frost forms in geometric lines", "The echo of water drips even when none falls"],
+            interactive_elements=["A reflective patch shows a moving star-map", "A loose stone hides a small focus shard"],
+            hidden_info=["The shard resonates with any arcane focus; it can later ‘tune’ a door or disrupt a pulse"],
+            checks_and_dc=["Easy check to find the loose stone; Hard check to interpret the star-map"],
+            branching_choices=["If they take the shard, later hazards are easier; if they leave it, a rival finds it first"],
+            fail_forward="Even if they misread the star-map, it still points them toward the next objective—just with added risk.",
+            time_pressure="Each failed attempt increases ambient distortion (disadvantage on the next perception-style check).",
+        ),
+        LocationStep(
+            step_id=f"{scene.scene_id}-L3",
+            location_name="Trigger Point",
+            player_read_aloud="A pulse runs through the floor like a giant heartbeat. Dust lifts, hangs, then falls in slow motion.",
+            dm_background="This is your encounter trigger. If the scene has a combat encounter, trigger it here. If not, trigger a social/puzzle complication that forces a choice.",
+            sensory_details=["Gravity feels ‘soft’ for a second", "A thin ringing sound builds, then snaps off"],
+            interactive_elements=["A cracked pillar that can be toppled for cover", "A narrow ledge that offers a safer route"],
+            hidden_info=["The pulse cycle is predictable; timing actions with it reduces risk"],
+            checks_and_dc=["Moderate check to predict the next pulse window"],
+            branching_choices=["If they rush, they trigger the encounter at a disadvantage; if they wait, the encounter arrives but they choose terrain"],
+            fail_forward="If timing fails, the party still proceeds—just with a complication (lost resource, separated PC, or louder entry).",
+            time_pressure="After 3 pulse cycles, the environment shifts (terrain changes or exits begin closing).",
+        ),
+    ]
+
+    cast = []
+    for e in scene.encounters:
+        cast.append(f"{e.encounter_id}: {e.type} ({e.difficulty})")
+
+    return ExpandedSceneGuide(
+        scene_id=scene.scene_id,
+        scene_title=scene.title,
+        dm_scene_intent="Run this scene as a pressure-cooker: clues first, then a rising pulse that forces movement and decisions.",
+        scene_summary_for_dm=f"(Demo mode) A step-by-step location run for {scene.scene_id} that includes read-aloud and DM-only context.",
+        cast_in_scene=cast if cast else ["No listed encounters; treat as exploration + revelation."],
+        step_by_step_locations=steps,
+        encounter_integration_notes=[
+            "Place the primary encounter at the Trigger Point (final step) after the party has at least one actionable clue.",
+            "If the party stalls, escalate time pressure (pulse spikes) rather than adding more exposition."
+        ],
+        loot_and_rewards_detail=["A small focus shard (minor) that foreshadows a larger lens relic."],
+        continuity_checks=["Echoes/loops and mirrored sky reflections are present.", "Clues imply a siphon network."],
+        optional_complications=["A fey observer briefly mirrors a PC’s voice, sowing distrust."],
+    )
+
+
 def is_quota_error(e: Exception) -> bool:
     msg = str(e)
     return ("insufficient_quota" in msg) or ("exceeded your current quota" in msg)
 
 
-# =========================
+# ============================================================
 # Streamlit UI
-# =========================
+# ============================================================
 
-st.set_page_config(page_title="OdysseyMaker — Adventure Outline", layout="wide")
-st.title("OdysseyMaker — D&D Adventure Outline Generator")
+st.set_page_config(page_title="OdysseyMaker — Adventure + DM Scene Guides", layout="wide")
+st.title("OdysseyMaker — D&D Adventure Generator (Outline + DM Scene Guides)")
+
+# Session state init
+if "outline_result" not in st.session_state:
+    st.session_state["outline_result"] = None
+if "last_outline_request" not in st.session_state:
+    st.session_state["last_outline_request"] = None
+if "scene_guides" not in st.session_state:
+    st.session_state["scene_guides"] = {}  # scene_id -> guide dict
+if "last_error" not in st.session_state:
+    st.session_state["last_error"] = None
 
 # Prefer Streamlit secrets; fall back to env var
 api_key = st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else None
 api_key = api_key or os.environ.get("OPENAI_API_KEY")
 
-# Demo mode is allowed even without an API key
 client = OpenAI(api_key=api_key) if api_key else None
 
 with st.sidebar:
@@ -590,19 +746,25 @@ concept = st.text_area(
     height=140,
 )
 
-colX, colY = st.columns([1, 1])
+colX, colY, colZ = st.columns([1, 1, 1])
 with colX:
     generate_btn = st.button("Generate outline", type="primary")
 with colY:
     clear_btn = st.button("Clear results")
+with colZ:
+    clear_guides_btn = st.button("Clear scene guides")
 
 if clear_btn:
-    st.session_state.pop("outline_result", None)
-    st.session_state.pop("last_error", None)
+    st.session_state["outline_result"] = None
+    st.session_state["last_outline_request"] = None
+    st.session_state["last_error"] = None
 
-# =========================
-# Generation trigger
-# =========================
+if clear_guides_btn:
+    st.session_state["scene_guides"] = {}
+
+# ============================================================
+# Outline generation trigger
+# ============================================================
 
 if generate_btn:
     constraints = [c.strip() for c in constraints_text.splitlines() if c.strip()]
@@ -630,18 +792,19 @@ if generate_btn:
             if demo_mode:
                 result = demo_outline_response(req)
             else:
-                # Real generation
                 result = generate_outline_pair(client, model, req)  # type: ignore
 
             st.session_state["outline_result"] = result.model_dump()
-            st.session_state.pop("last_error", None)
+            st.session_state["last_outline_request"] = req.model_dump()
+            st.session_state["last_error"] = None
 
         except Exception as e:
             if is_quota_error(e):
                 st.warning("API quota exceeded for this key. Switching to Demo mode output.")
                 result = demo_outline_response(req)
                 st.session_state["outline_result"] = result.model_dump()
-                st.session_state.pop("last_error", None)
+                st.session_state["last_outline_request"] = req.model_dump()
+                st.session_state["last_error"] = None
             else:
                 st.session_state["last_error"] = str(e)
                 st.error(f"Generation failed: {e}")
@@ -650,130 +813,209 @@ if st.session_state.get("last_error"):
     st.warning("Last error:")
     st.code(st.session_state["last_error"])
 
-# =========================
-# Render results
-# =========================
+# ============================================================
+# Render results + Scene expansion buttons
+# ============================================================
 
 data = st.session_state.get("outline_result")
 if data:
     result = OutlineResponse.model_validate(data)
+    st.subheader("Adventure Output")
 
-    left, right = st.columns([1, 1])
+    top_left, top_right = st.columns([1, 1])
 
-    with left:
-        st.subheader("High-level Story Outline")
-        st.markdown(f"### {result.outline.title}")
+    with top_left:
+        st.markdown(f"## {result.outline.title}")
         st.write(result.outline.logline)
         st.markdown(f"**Central conflict:** {result.outline.central_conflict}")
         st.markdown(f"**Antagonist:** {result.outline.villain_or_antagonist}")
 
-        st.markdown("#### Hooks")
+        st.markdown("### Hooks")
         for h in result.outline.hooks:
             st.write(f"- {h}")
 
-        st.markdown("#### Key NPCs")
-        for npc in result.outline.key_npcs:
-            with st.expander(npc.name):
-                st.write(f"**Role:** {npc.role}")
-                st.write(f"**Public face:** {npc.public_face}")
-                st.write(f"**Secret:** {npc.secret}")
-                st.write(f"**Leverage:** {npc.leverage}")
-
-        st.markdown("#### Factions")
-        for f in result.outline.factions:
-            with st.expander(f.name):
-                st.write(f"**Goal:** {f.goal}")
-                st.write(f"**Method:** {f.method}")
-                st.write(f"**Complication:** {f.complication}")
-
-        st.markdown("#### Beats")
-        for b in result.outline.beats:
-            with st.expander(f"{b.beat_id}: {b.title}"):
-                st.write(f"**Purpose:** {b.purpose}")
-                st.write(f"**Stakes:** {b.stakes}")
-                st.write(f"**Twist/Revelation:** {b.twist_or_reveal}")
-
-        st.markdown("#### Continuity promises")
+        st.markdown("### Continuity promises")
         for p in result.outline.continuity_promises:
             st.write(f"- {p}")
 
-    with right:
-        st.subheader("Detailed Outline (Scenes + Encounters + Leveling)")
-
-        st.markdown("#### Structure notes")
+    with top_right:
+        st.markdown("### Structure notes")
         for n in result.detailed.structure_notes:
             st.write(f"- {n}")
 
-        st.markdown("#### Scenes")
-        for s in result.detailed.scenes:
-            with st.expander(f"{s.scene_id}: {s.title} ({s.estimated_minutes} min) — {s.location}"):
-                st.write(f"**Goal:** {s.goal}")
-                st.markdown("**Boxed text:**")
-                st.write(s.boxed_text)
-
-                st.markdown("**Obstacles:**")
-                for o in s.obstacles:
-                    st.write(f"- {o}")
-
-                st.markdown("**Encounters:**")
-                for e in s.encounters:
-                    st.write(f"- **{e.encounter_id} [{e.type} | {e.difficulty}]** — {e.summary}")
-                    st.write(f"  - Win: {e.win_condition}")
-                    st.write(f"  - Fail forward: {e.fail_forward}")
-                    if e.setup:
-                        st.write("  - Setup:")
-                        for x in e.setup:
-                            st.write(f"    - {x}")
-                    if e.scaling_notes:
-                        st.write("  - Scaling:")
-                        for x in e.scaling_notes:
-                            st.write(f"    - {x}")
-
-                st.markdown("**Clues & info:**")
-                for c in s.clues_and_info:
-                    st.write(f"- {c}")
-
-                st.markdown("**Rewards:**")
-                for r in s.rewards:
-                    st.write(f"- {r}")
-
-                st.markdown("**Consequences:**")
-                for c in s.consequences:
-                    st.write(f"- {c}")
-
-                if s.links_to_beats:
-                    st.caption("Links to beats: " + ", ".join(s.links_to_beats))
-
-        st.markdown("#### Level progression")
+        st.markdown("### Level progression")
         for lp in result.detailed.level_progression:
             st.write(f"- **{lp.step_id}**: After **{lp.after_scene_id}** → Level **{lp.level}**")
             st.caption(lp.rationale)
-            if lp.optional_side_objectives:
-                st.caption("Optional: " + "; ".join(lp.optional_side_objectives))
-
-        if result.detailed.optional_side_quests:
-            st.markdown("#### Optional side quests")
-            for q in result.detailed.optional_side_quests:
-                st.write(f"- {q}")
-
-        if result.detailed.recap_questions:
-            st.markdown("#### Recap questions")
-            for q in result.detailed.recap_questions:
-                st.write(f"- {q}")
 
     st.divider()
-    col1, col2 = st.columns(2)
-    with col1:
+    st.markdown("## Scenes (expand into DM guides)")
+
+    # Need request settings to expand scenes
+    req_dict = st.session_state.get("last_outline_request")
+    req_obj: Optional[OutlineRequest] = None
+    if req_dict:
+        req_obj = OutlineRequest.model_validate(req_dict)
+
+    for s in result.detailed.scenes:
+        with st.expander(f"{s.scene_id}: {s.title} ({s.estimated_minutes} min) — {s.location}", expanded=False):
+            st.write(f"**Goal:** {s.goal}")
+            st.markdown("**Boxed text:**")
+            st.write(s.boxed_text)
+
+            st.markdown("**Obstacles:**")
+            for o in s.obstacles:
+                st.write(f"- {o}")
+
+            st.markdown("**Encounters:**")
+            for e in s.encounters:
+                st.write(f"- **{e.encounter_id} [{e.type} | {e.difficulty}]** — {e.summary}")
+                st.write(f"  - Win: {e.win_condition}")
+                st.write(f"  - Fail forward: {e.fail_forward}")
+
+            st.markdown("**Clues & info:**")
+            for c in s.clues_and_info:
+                st.write(f"- {c}")
+
+            st.markdown("**Rewards:**")
+            for r in s.rewards:
+                st.write(f"- {r}")
+
+            st.markdown("**Consequences:**")
+            for c in s.consequences:
+                st.write(f"- {c}")
+
+            if s.links_to_beats:
+                st.caption("Links to beats: " + ", ".join(s.links_to_beats))
+
+            st.divider()
+            col1, col2 = st.columns([1, 2])
+
+            with col1:
+                expand_key = f"expand_{s.scene_id}"
+                if st.button(f"Expand {s.scene_id} (DM Guide)", key=expand_key):
+                    if not req_obj:
+                        st.error("Generate an outline first so the app knows your settings.")
+                    else:
+                        with st.spinner(f"Expanding {s.scene_id} into a DM guide..."):
+                            try:
+                                if demo_mode or not api_key:
+                                    guide = demo_scene_guide(req_obj, result.outline, result.detailed, s)
+                                else:
+                                    guide = generate_scene_guide(  # type: ignore
+                                        client, model, req_obj, result.outline, result.detailed, s
+                                    )
+                                st.session_state["scene_guides"][s.scene_id] = guide.model_dump()
+                                st.success(f"Generated DM guide for {s.scene_id}.")
+                            except Exception as e:
+                                if is_quota_error(e):
+                                    st.warning("Quota exceeded; using Demo guide instead.")
+                                    guide = demo_scene_guide(req_obj, result.outline, result.detailed, s)
+                                    st.session_state["scene_guides"][s.scene_id] = guide.model_dump()
+                                else:
+                                    st.error(f"Scene expansion failed: {e}")
+
+            with col2:
+                if s.scene_id in st.session_state["scene_guides"]:
+                    if st.button(f"Remove DM Guide for {s.scene_id}", key=f"remove_{s.scene_id}"):
+                        st.session_state["scene_guides"].pop(s.scene_id, None)
+                        st.info("Removed.")
+
+            guide_data = st.session_state["scene_guides"].get(s.scene_id)
+            if guide_data:
+                guide = ExpandedSceneGuide.model_validate(guide_data)
+
+                st.markdown("### DM Guide")
+                st.write(guide.dm_scene_intent)
+                st.write(guide.scene_summary_for_dm)
+
+                if guide.cast_in_scene:
+                    st.markdown("**Cast in scene:**")
+                    for x in guide.cast_in_scene:
+                        st.write(f"- {x}")
+
+                if guide.encounter_integration_notes:
+                    st.markdown("**Encounter integration notes:**")
+                    for x in guide.encounter_integration_notes:
+                        st.write(f"- {x}")
+
+                st.markdown("### Step-by-step locations")
+                for step in guide.step_by_step_locations:
+                    with st.expander(f"{step.step_id}: {step.location_name}", expanded=False):
+                        st.markdown("**Read aloud (players):**")
+                        st.write(step.player_read_aloud)
+
+                        st.markdown("**DM background (private):**")
+                        st.write(step.dm_background)
+
+                        if step.sensory_details:
+                            st.markdown("**Sensory details:**")
+                            for x in step.sensory_details:
+                                st.write(f"- {x}")
+
+                        if step.interactive_elements:
+                            st.markdown("**Interactive elements:**")
+                            for x in step.interactive_elements:
+                                st.write(f"- {x}")
+
+                        if step.hidden_info:
+                            st.markdown("**Hidden info:**")
+                            for x in step.hidden_info:
+                                st.write(f"- {x}")
+
+                        if step.checks_and_dc:
+                            st.markdown("**Checks / DCs:**")
+                            for x in step.checks_and_dc:
+                                st.write(f"- {x}")
+
+                        if step.branching_choices:
+                            st.markdown("**Branching choices:**")
+                            for x in step.branching_choices:
+                                st.write(f"- {x}")
+
+                        st.markdown("**Fail forward:**")
+                        st.write(step.fail_forward)
+
+                        if step.time_pressure:
+                            st.markdown("**Time pressure:**")
+                            st.write(step.time_pressure)
+
+                if guide.loot_and_rewards_detail:
+                    st.markdown("**Loot & rewards detail:**")
+                    for x in guide.loot_and_rewards_detail:
+                        st.write(f"- {x}")
+
+                if guide.continuity_checks:
+                    st.markdown("**Continuity checks:**")
+                    for x in guide.continuity_checks:
+                        st.write(f"- {x}")
+
+                if guide.optional_complications:
+                    st.markdown("**Optional complications:**")
+                    for x in guide.optional_complications:
+                        st.write(f"- {x}")
+
+                st.divider()
+                st.download_button(
+                    f"Download DM guide JSON ({s.scene_id})",
+                    data=json.dumps(guide.model_dump(), indent=2),
+                    file_name=f"{s.scene_id}_dm_guide.json",
+                    mime="application/json",
+                )
+
+    st.divider()
+    colA, colB = st.columns(2)
+    with colA:
         st.download_button(
-            "Download full JSON",
+            "Download full adventure JSON",
             data=json.dumps(result.model_dump(), indent=2),
-            file_name="adventure_outline.json",
+            file_name="adventure_full.json",
             mime="application/json",
         )
-    with col2:
+    with colB:
         st.download_button(
-            "Download high-level outline JSON only",
+            "Download outline JSON only",
             data=json.dumps(result.outline.model_dump(), indent=2),
-            file_name="adventure_outline_high_level.json",
+            file_name="adventure_outline.json",
             mime="application/json",
         )
