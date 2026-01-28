@@ -66,7 +66,10 @@ class AdventureOutline(BaseModel):
     key_npcs: List[KeyNPC]
     factions: List[Faction]
     beats: List[StoryBeat]
-    continuity_promises: List[str] = Field(default_factory=list, description="Facts that must remain true in detailed outline")
+    continuity_promises: List[str] = Field(
+        default_factory=list,
+        description="Facts that must remain true in detailed outline (always include this field)."
+    )
 
 
 class Encounter(BaseModel):
@@ -131,17 +134,29 @@ Never output markdown, only JSON.
 """
 
 
-def enforce_additional_properties_false(schema: dict) -> dict:
+def enforce_openai_strict_schema(schema: dict) -> dict:
     """
-    OpenAI strict JSON Schema requires: additionalProperties=false on *every* object schema.
-    Pydantic's generated JSON schema may omit this in nested objects, so we patch it in.
+    OpenAI strict JSON schema requirements (as enforced by the API):
+      - For every object schema:
+          - additionalProperties must be false
+          - required must exist and include EVERY key in properties
+    Pydantic's model_json_schema() doesn't always set required that way (esp. fields w/ defaults),
+    so we patch it recursively.
     """
     def walk(node):
         if isinstance(node, dict):
-            if node.get("type") == "object":
-                node.setdefault("additionalProperties", False)
+            # Recurse first so nested pieces get patched too
             for v in node.values():
                 walk(v)
+
+            if node.get("type") == "object":
+                props = node.get("properties", {})
+                if isinstance(props, dict) and props:
+                    # Force strict "no extra keys"
+                    node["additionalProperties"] = False
+                    # Force "all keys required"
+                    node["required"] = sorted(list(props.keys()))
+
         elif isinstance(node, list):
             for item in node:
                 walk(item)
@@ -164,7 +179,14 @@ def _extract_output_text(resp) -> str:
     return out_text
 
 
-def generate_json_schema(client: OpenAI, model: str, schema_name: str, schema: dict, user_payload: dict, extra_instructions: str) -> dict:
+def generate_json_schema(
+    client: OpenAI,
+    model: str,
+    schema_name: str,
+    schema: dict,
+    user_payload: dict,
+    extra_instructions: str,
+) -> dict:
     resp = client.responses.create(
         model=model,
         input=[
@@ -200,7 +222,7 @@ def build_outline_prompt(req: OutlineRequest) -> dict:
             "Beats should be 5–9 items depending on session_count_target.",
             "Include at least 2 hooks.",
             "Include at least 3 key NPCs and at least 1 faction (2 preferred).",
-            "continuity_promises: 5–12 bullet-style facts that must remain true later.",
+            "continuity_promises: include 5–12 bullet-style facts (always include the field, even if empty).",
         ],
     }
 
@@ -222,21 +244,23 @@ def build_detailed_prompt(req: OutlineRequest, outline: AdventureOutline) -> dic
 
 
 def generate_outline_pair(client: OpenAI, model: str, req: OutlineRequest) -> OutlineResponse:
+    outline_schema = enforce_openai_strict_schema(AdventureOutline.model_json_schema())
     outline_data = generate_json_schema(
         client=client,
         model=model,
         schema_name="adventure_outline",
-        schema=enforce_additional_properties_false(AdventureOutline.model_json_schema()),
+        schema=outline_schema,
         user_payload=build_outline_prompt(req),
         extra_instructions="Create the HIGH-LEVEL AdventureOutline JSON now.",
     )
     outline = AdventureOutline.model_validate(outline_data)
 
+    detailed_schema = enforce_openai_strict_schema(DetailedAdventureOutline.model_json_schema())
     detailed_data = generate_json_schema(
         client=client,
         model=model,
         schema_name="detailed_adventure_outline",
-        schema=enforce_additional_properties_false(DetailedAdventureOutline.model_json_schema()),
+        schema=detailed_schema,
         user_payload=build_detailed_prompt(req, outline),
         extra_instructions="Now expand into a DETAILED Adventure outline with scenes, encounters, and level progression.",
     )
@@ -256,11 +280,8 @@ st.set_page_config(page_title="OdysseyMaker — Adventure Outline", layout="wide
 st.title("OdysseyMaker — D&D Adventure Outline Generator")
 
 # Prefer Streamlit secrets; fall back to env var
-api_key = None
-if hasattr(st, "secrets") and "OPENAI_API_KEY" in st.secrets:
-    api_key = st.secrets["OPENAI_API_KEY"]
-else:
-    api_key = os.environ.get("OPENAI_API_KEY")
+api_key = st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else None
+api_key = api_key or os.environ.get("OPENAI_API_KEY")
 
 if not api_key:
     st.error("Missing OPENAI_API_KEY. Set it in Streamlit Secrets (recommended) or as an environment variable.")
@@ -339,7 +360,7 @@ if generate_btn:
             st.session_state["last_error"] = str(e)
             st.error(f"Generation failed: {e}")
 
-if "last_error" in st.session_state and st.session_state["last_error"]:
+if st.session_state.get("last_error"):
     st.warning("Last error:")
     st.code(st.session_state["last_error"])
 
@@ -439,16 +460,6 @@ if data:
             st.caption(lp.rationale)
             if lp.optional_side_objectives:
                 st.caption("Optional: " + "; ".join(lp.optional_side_objectives))
-
-        if result.detailed.optional_side_quests:
-            st.markdown("#### Optional side quests")
-            for q in result.detailed.optional_side_quests:
-                st.write(f"- {q}")
-
-        if result.detailed.recap_questions:
-            st.markdown("#### Recap questions")
-            for q in result.detailed.recap_questions:
-                st.write(f"- {q}")
 
     st.divider()
     col1, col2 = st.columns(2)
