@@ -4,7 +4,6 @@ from typing import List, Literal
 
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
-
 from openai import OpenAI
 
 # =========================
@@ -132,11 +131,27 @@ Never output markdown, only JSON.
 """
 
 
+def enforce_additional_properties_false(schema: dict) -> dict:
+    """
+    OpenAI strict JSON Schema requires: additionalProperties=false on *every* object schema.
+    Pydantic's generated JSON schema may omit this in nested objects, so we patch it in.
+    """
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                node.setdefault("additionalProperties", False)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    schema_copy = json.loads(json.dumps(schema))  # deep copy
+    walk(schema_copy)
+    return schema_copy
+
+
 def _extract_output_text(resp) -> str:
-    """
-    OpenAI Responses API returns a list in resp.output, containing message items with content blocks.
-    We extract the first output_text block.
-    """
     out_text = None
     for item in getattr(resp, "output", []):
         if getattr(item, "type", None) == "message":
@@ -211,7 +226,7 @@ def generate_outline_pair(client: OpenAI, model: str, req: OutlineRequest) -> Ou
         client=client,
         model=model,
         schema_name="adventure_outline",
-        schema=AdventureOutline.model_json_schema(),
+        schema=enforce_additional_properties_false(AdventureOutline.model_json_schema()),
         user_payload=build_outline_prompt(req),
         extra_instructions="Create the HIGH-LEVEL AdventureOutline JSON now.",
     )
@@ -221,13 +236,12 @@ def generate_outline_pair(client: OpenAI, model: str, req: OutlineRequest) -> Ou
         client=client,
         model=model,
         schema_name="detailed_adventure_outline",
-        schema=DetailedAdventureOutline.model_json_schema(),
+        schema=enforce_additional_properties_false(DetailedAdventureOutline.model_json_schema()),
         user_payload=build_detailed_prompt(req, outline),
         extra_instructions="Now expand into a DETAILED Adventure outline with scenes, encounters, and level progression.",
     )
     detailed = DetailedAdventureOutline.model_validate(detailed_data)
 
-    # Ensure a title is present
     if not detailed.outline_title.strip():
         detailed.outline_title = outline.title
 
